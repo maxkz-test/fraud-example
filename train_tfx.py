@@ -66,20 +66,25 @@ def _create_model():
         colname: tf.keras.layers.Input(name=colname, shape=(), dtype=tf.float32)
         for colname in _DENSE_FLOAT_FEATURE_KEYS
     }
+    real_valued_columns = [
 
-    output = tf.keras.layers.Dense(30, activation='relu')(input_layers)
-    output = tf.keras.layers.Dense(40, activation='relu')(output)
-    output = tf.keras.layers.Dense(50, activation='relu')(output)
-    output = tf.keras.layers.Dense(1)(output)
 
+        tf.feature_column.numeric_column(key, shape=())
+        for key in _DENSE_FLOAT_FEATURE_KEYS
+    ]
+
+    deep = tf.keras.layers.DenseFeatures(real_valued_columns)(input_layers)
+    deep = tf.keras.layers.Dense(40)(deep)
+    deep = tf.keras.layers.Dense(50)(deep)
+    output = tf.keras.layers.Dense(1)(deep)
     model = tf.keras.Model(input_layers, output)
     model.compile(
-        loss      = tf.keras.losses.BinaryCrossentropy(from_logits=True),
-        optimizer = tf.keras.optimizers.Adam(lr=0.001),
-        metrics   = [tf.keras.metrics.BinaryAccuracy()])
-
+        loss=tf.keras.losses.BinaryCrossentropy(from_logits=True),
+        optimizer=tf.keras.optimizers.Adam(lr=0.001),
+        metrics=[tf.keras.metrics.BinaryAccuracy()])
     model.summary(print_fn=absl.logging.info)
     return model
+
 
 def run_fn(fn_args: tfx.components.FnArgs):
     """
