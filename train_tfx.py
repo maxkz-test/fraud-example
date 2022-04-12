@@ -84,7 +84,71 @@ def _create_model():
         metrics=[tf.keras.metrics.BinaryAccuracy()])
     model.summary(print_fn=absl.logging.info)
     return model
+def _get_tf_examples_serving_signature(model, tf_transform_output):
+  """Returns a serving signature that accepts `tensorflow.Example`."""
 
+  # We need to track the layers in the model in order to save it.
+  # TODO(b/162357359): Revise once the bug is resolved.
+  model.tft_layer_inference = tf_transform_output.transform_features_layer()
+
+  @tf.function(input_signature=[
+      tf.TensorSpec(shape=[None], dtype=tf.string, name='examples')
+  ])
+  def serve_tf_examples_fn(serialized_tf_example):
+    """Returns the output to be used in the serving signature."""
+    raw_feature_spec = tf_transform_output.raw_feature_spec()
+    # Remove label feature since these will not be present at serving time.
+    raw_feature_spec.pop(_LABEL_KEY)
+    raw_features = tf.io.parse_example(serialized_tf_example, raw_feature_spec)
+    transformed_features = model.tft_layer_inference(raw_features)
+    #logging.info('serve_transformed_features = %s', transformed_features)
+
+    outputs = model(transformed_features)
+    # TODO(b/154085620): Convert the predicted labels from the model using a
+    # reverse-lookup (opposite of transform.py).
+    return {'outputs': outputs}
+
+  return serve_tf_examples_fn
+
+
+def _get_transform_features_signature(model, tf_transform_output):
+  """Returns a serving signature that applies tf.Transform to features."""
+
+  # We need to track the layers in the model in order to save it.
+  # TODO(b/162357359): Revise once the bug is resolved.
+  model.tft_layer_eval = tf_transform_output.transform_features_layer()
+
+  @tf.function(input_signature=[
+      tf.TensorSpec(shape=[None], dtype=tf.string, name='examples')
+  ])
+  def transform_features_fn(serialized_tf_example):
+    """Returns the transformed_features to be fed as input to evaluator."""
+    raw_feature_spec = tf_transform_output.raw_feature_spec()
+    raw_features = tf.io.parse_example(serialized_tf_example, raw_feature_spec)
+    transformed_features = model.tft_layer_eval(raw_features)
+    #logging.info('eval_transformed_features = %s', transformed_features)
+    return transformed_features
+
+  return transform_features_fn
+
+def export_serving_model(tf_transform_output, model, output_dir):
+  """Exports a keras model for serving.
+  Args:
+    tf_transform_output: Wrapper around output of tf.Transform.
+    model: A keras model to export for serving.
+    output_dir: A directory where the model will be exported to.
+  """
+  # The layer has to be saved to the model for keras tracking purpases.
+  model.tft_layer = tf_transform_output.transform_features_layer()
+
+  signatures = {
+      'serving_default':
+          _get_tf_examples_serving_signature(model, tf_transform_output),
+      'transform_features':
+          _get_transform_features_signature(model, tf_transform_output),
+  }
+
+  model.save(output_dir, save_format='tf', signatures=signatures)
 
 def run_fn(fn_args: tfx.components.FnArgs):
     """
@@ -93,7 +157,37 @@ def run_fn(fn_args: tfx.components.FnArgs):
       fn_args: Holds args used to train the model as name/value pairs.
 
     """
+    tf_transform_output = tft.TFTransformOutput(fn_args.transform_output)
 
+    train_dataset = _input_fn(fn_args.train_files, fn_args.data_accessor,
+                              tf_transform_output, 40)
+
+    eval_dataset = _input_fn(fn_args.eval_files, fn_args.data_accessor,
+                             tf_transform_output, 40)
+
+    model = _create_model()
+
+    tensorboard_callback = tf.keras.callbacks.TensorBoard(
+        log_dir=fn_args.model_run_dir, update_freq='batch')
+    model.fit(
+        train_dataset,
+        epochs=NUM_EPOCHS,
+        steps_per_epoch=fn_args.train_steps,
+        validation_data=eval_dataset,
+        validation_steps=fn_args.eval_steps,
+        callbacks=[tensorboard_callback])
+    export_serving_model(tf_transform_output, model, fn_args.serving_model_dir)
+    #signatures = {
+    #    'serving_default':
+    #        _get_serve_tf_examples_fn(model,
+    #                                  tf_transform_output).get_concrete_function(
+    #            tf.TensorSpec(
+    #                shape=[None],
+    #                dtype=tf.string,
+    #                name='examples')),
+    #}
+    #model.save(fn_args.serving_model_dir, save_format='tf', signatures=signatures)
+    """
     tf_transform_output = tft.TFTransformOutput(fn_args.transform_output)
     train_dataset = _input_fn(fn_args.train_files, fn_args.data_accessor,
                               tf_transform_output, 32)
@@ -103,6 +197,7 @@ def run_fn(fn_args: tfx.components.FnArgs):
     model = _create_model()
     tensorboard_callback = tf.keras.callbacks.TensorBoard(
         log_dir=fn_args.model_run_dir, update_freq='batch')
+
 
     model.fit(
         train_dataset,
@@ -121,4 +216,6 @@ def run_fn(fn_args: tfx.components.FnArgs):
                     dtype=tf.string,
                     name='examples')),
     }
+
     model.save(fn_args.serving_model_dir, save_format='tf', signatures=signatures)
+    """
